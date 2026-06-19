@@ -1,0 +1,6 @@
+{
+  "name": "SafeHer",
+  "description": "SafeHer is a comprehensive women's personal safety and holistic wellness web application featuring dynamic SOS alerts, simulated realistic incoming fake emergency calls, location sharing, emergency hotlines, cycle tracker, and stress check tools in an elegant, responsive mobile-first interface.",
+  "requestFramePermissions": ["microphone", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
