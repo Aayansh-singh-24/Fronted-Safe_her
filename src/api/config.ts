@@ -1,7 +1,7 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem('authToken');
+  const token = localStorage.getItem('safeher_token');
 
   const headers = new Headers(options.headers);
   if (!headers.has('Content-Type') && options.body) {
