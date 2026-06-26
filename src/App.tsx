@@ -31,8 +31,19 @@ import {
   PhoneCall,
   Calendar,
   Activity,
-  UserCheck
+  UserCheck,
+  Edit,
+  Trash2
 } from 'lucide-react';
+import {
+  createContact,
+  formatContactPhone,
+  normalizePhoneNumber,
+  readContacts,
+  editContact,
+  removeContact,
+} from './api/trustedContacts';
+import AuthScreen from './components/AuthScreen';
 
 // Define TS Types internally
 interface Friend {
@@ -69,8 +80,10 @@ interface AppNotification {
 }
 
 export default function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+
   // Mobile shell screen controller
-  const [currentScreen, setCurrentScreen] = useState<'home' | 'record' | 'fakecall' | 'help' | 'profile'>('home');
+  const [currentScreen, setCurrentScreen] = useState<'home' | 'record' | 'fakecall' | 'help' | 'profile' | 'contacts'>('home');
   
   // App profile configuration
   const [profile, setProfile] = useState({
@@ -102,11 +115,23 @@ export default function App() {
   const [locationPulse, setLocationPulse] = useState(false);
 
   // Friends List
-  const [friends, setFriends] = useState<Friend[]>([
-    { id: '1', name: 'Mom', phone: '+91 98765 43210', isTracking: true }
-  ]);
+  const [friends, setFriends] = useState<Friend[]>([]);
   const [showAddFriendModal, setShowAddFriendModal] = useState(false);
   const [newFriendForm, setNewFriendForm] = useState({ name: '', phone: '' });
+  const [contactsLoading, setContactsLoading] = useState(true);
+  const [savingContact, setSavingContact] = useState(false);
+  
+  // Selected & Edit Contact States
+  const [selectedContact, setSelectedContact] = useState<Friend | null>(null);
+  const [showContactDetailsModal, setShowContactDetailsModal] = useState(false);
+  const [editingContact, setEditingContact] = useState<Friend | null>(null);
+  const [showEditContactModal, setShowEditContactModal] = useState(false);
+  const [editContactForm, setEditContactForm] = useState({ name: '', phone: '', isSOS: true });
+  const [savingEditContact, setSavingEditContact] = useState(false);
+  const [removingContact, setRemovingContact] = useState(false);
+  const [showDeleteConfirmModal, setShowDeleteConfirmModal] = useState(false);
+  const [contactToDeleteId, setContactToDeleteId] = useState<string | null>(null);
+
 
   // Fake Call setup
   const [callerSetup, setCallerSetup] = useState({
@@ -272,6 +297,44 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [sosCountdown]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadContacts = async () => {
+      setContactsLoading(true);
+      try {
+        const contacts = await readContacts();
+        if (cancelled) return;
+
+        setFriends(
+          contacts.map((contact) => ({
+            id: String(contact.id),
+            name: contact.name,
+            phone: formatContactPhone(contact),
+            isTracking: contact.isSOS,
+          }))
+        );
+      } catch (error) {
+        if (!cancelled) {
+          pushNotification(
+            'Could not load contacts',
+            error instanceof Error ? error.message : 'Failed to fetch emergency contacts.'
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setContactsLoading(false);
+        }
+      }
+    };
+
+    loadContacts();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Fake Phone Call active durational stopwatch
   useEffect(() => {
     if (fakeCallState === 'active') {
@@ -387,8 +450,46 @@ export default function App() {
   const toggleLocationSharing = () => {
     if (!isSharingLocation) {
       setIsSharingLocation(true);
-      setLocCoordinates({ lat: 12.9716, lng: 77.5946 }); 
-      pushNotification('Location Sharing On', 'Your emergency contacts can track you live now.');
+      pushNotification('Requesting Location', 'Fetching your location...');
+      
+      const fallbackToIPLocation = async () => {
+        try {
+          const response = await fetch('https://ipapi.co/json/');
+          const data = await response.json();
+          if (data && data.latitude && data.longitude) {
+            setLocCoordinates({ 
+              lat: data.latitude, 
+              lng: data.longitude 
+            });
+            pushNotification('Location Sharing On', 'Using network location. Contacts can track you.');
+          } else {
+            throw new Error("Invalid IP location data");
+          }
+        } catch (err) {
+          console.error("IP Location fallback failed", err);
+          setIsSharingLocation(false);
+          pushNotification('Location Error', 'Could not determine location from device or network.');
+        }
+      };
+
+      if ("geolocation" in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            setLocCoordinates({ 
+              lat: position.coords.latitude, 
+              lng: position.coords.longitude 
+            });
+            pushNotification('Location Sharing On', 'Your emergency contacts can track you live now.');
+          },
+          (error) => {
+            console.warn("GPS failed, falling back to IP location:", error.message);
+            fallbackToIPLocation();
+          },
+          { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
+        );
+      } else {
+        fallbackToIPLocation();
+      }
     } else {
       setIsSharingLocation(false);
       setLocCoordinates(null);
@@ -396,8 +497,9 @@ export default function App() {
     }
   };
 
-  const handleAddFriend = (e: React.FormEvent) => {
+  const handleAddFriend = async (e: React.FormEvent) => {
     e.preventDefault();
+<<<<<<< HEAD
     if (!newFriendForm.name || !newFriendForm.phone) return;
     const newFr: Friend = {
       id: Date.now().toString(),
@@ -409,6 +511,108 @@ export default function App() {
     setNewFriendForm({ name: '', phone: '' });
     setShowAddFriendModal(false);
     pushNotification('Added Friend', `${newFr.name} is now added for emergency SOS tracking.`);
+=======
+    if (!newFriendForm.name || !newFriendForm.phone || savingContact) return;
+
+    setSavingContact(true);
+    try {
+      const phoneNumber = normalizePhoneNumber(newFriendForm.phone);
+      const contact = await createContact({
+        name: newFriendForm.name.trim(),
+        phone_number: phoneNumber,
+        is_sos_contact: true,
+      });
+
+      const newFr: Friend = {
+        id: String(contact.id),
+        name: contact.name,
+        phone: formatContactPhone(contact),
+        isTracking: contact.isSOS,
+      };
+
+      setFriends((prev) => [...prev, newFr]);
+      setNewFriendForm({ name: '', phone: '' });
+      setShowAddFriendModal(false);
+      pushNotification('Added Friend', `${newFr.name} is now added for emergency SOS tracking.`);
+    } catch (error) {
+      pushNotification(
+        'Could not add contact',
+        error instanceof Error ? error.message : 'Failed to save emergency contact.'
+      );
+    } finally {
+      setSavingContact(false);
+    }
+  };
+
+  const handleEditContactSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingContact || !editContactForm.name || !editContactForm.phone || savingEditContact) return;
+
+    setSavingEditContact(true);
+    try {
+      const phoneNumber = normalizePhoneNumber(editContactForm.phone);
+      const contact = await editContact(Number(editingContact.id), {
+        name: editContactForm.name.trim(),
+        phone_number: phoneNumber,
+        is_sos_contact: editContactForm.isSOS,
+      });
+
+      const updatedFr: Friend = {
+        id: String(contact.id),
+        name: contact.name,
+        phone: formatContactPhone(contact),
+        isTracking: contact.isSOS,
+      };
+
+      setFriends((prev) => prev.map((f) => (f.id === updatedFr.id ? updatedFr : f)));
+      setShowEditContactModal(false);
+      setEditingContact(null);
+      
+      if (selectedContact?.id === updatedFr.id) {
+        setSelectedContact(updatedFr);
+      }
+
+      pushNotification('Updated Contact', `${updatedFr.name}'s details successfully updated.`);
+    } catch (error) {
+      pushNotification(
+        'Could not update contact',
+        error instanceof Error ? error.message : 'Failed to update emergency contact.'
+      );
+    } finally {
+      setSavingEditContact(false);
+    }
+  };
+
+  const initiateRemoveContact = (id: string) => {
+    setContactToDeleteId(id);
+    setShowDeleteConfirmModal(true);
+  };
+
+  const confirmRemoveContact = async () => {
+    if (!contactToDeleteId) return;
+
+    setRemovingContact(true);
+    try {
+      await removeContact(Number(contactToDeleteId));
+      setFriends((prev) => prev.filter((f) => f.id !== contactToDeleteId));
+      
+      if (selectedContact?.id === contactToDeleteId) {
+        setShowContactDetailsModal(false);
+        setSelectedContact(null);
+      }
+
+      pushNotification('Removed Contact', 'Emergency contact successfully removed.');
+    } catch (error) {
+      pushNotification(
+        'Could not remove contact',
+        error instanceof Error ? error.message : 'Failed to delete emergency contact.'
+      );
+    } finally {
+      setRemovingContact(false);
+      setShowDeleteConfirmModal(false);
+      setContactToDeleteId(null);
+    }
+>>>>>>> 69a8fce8edde7a5e1097e3a5ea2a2a7dc2612be2
   };
 
   const toggleTrackFriend = (id: string) => {
@@ -685,8 +889,19 @@ export default function App() {
 
   return (
     <div id="safeher-app-root">
-      {/* Centering phone simulation container */}
-      <div className="device-container">
+      {!isAuthenticated ? (
+        <AuthScreen 
+          onLoginSuccess={(userData) => {
+            setProfile(prev => ({ 
+              ...prev, 
+              name: userData.name, 
+              avatarLetter: userData.name.charAt(0).toUpperCase() 
+            }));
+            setIsAuthenticated(true);
+          }} 
+        />
+      ) : (
+        <div className="device-container">
         
         {/* Simulated Status Bar top */}
         <div className="mobile-system-status-bar">
@@ -700,11 +915,11 @@ export default function App() {
 
         {/* Top App Bar Header */}
         <header className="top-bar" id="safeher-header">
-          <div className="brand-section" onClick={() => { setCurrentScreen('home'); setActiveQuiz(false); setActiveCycle(false); setActiveForum(false); setActivePCOS(false); }}>
+          <div className="brand-section" onClick={() => { setCurrentScreen('profile'); setActiveQuiz(false); setActiveCycle(false); setActiveForum(false); setActivePCOS(false); }}>
             <div className="brand-logo-container">
               <Shield fill="#FFFFFF" stroke="#FFFFFF" />
             </div>
-            <h1 className="brand-title">SafeHer</h1>
+            <h1 className="brand-title">{profile.name}</h1>
           </div>
 
           <div className="header-actions">
@@ -767,9 +982,19 @@ export default function App() {
             </div>
 
             {/* Horizontal Friends List section */}
-            <div className="friends-tracker-card" id="card-friends-summary">
+            <div 
+              className="friends-tracker-card" 
+              id="card-friends-summary"
+              onClick={() => setCurrentScreen('contacts')}
+              style={{ cursor: 'pointer' }}
+            >
               <div className="friends-tracker-details">
-                {friends.length === 0 ? (
+                {contactsLoading ? (
+                  <>
+                    <h4 className="friends-tracker-title">Loading contacts...</h4>
+                    <p className="friends-tracker-subtext">Fetching your emergency contacts</p>
+                  </>
+                ) : friends.length === 0 ? (
                   <>
                     <h4 className="friends-tracker-title">No friends yet</h4>
                     <p className="friends-tracker-subtext">Add friends for SOS & Track me</p>
@@ -778,7 +1003,7 @@ export default function App() {
                   <>
                     <h4 className="friends-tracker-title">{friends.length} Emergency contact{friends.length > 1 ? 's' : ''} armed</h4>
                     <p className="friends-tracker-subtext">
-                      {friends.map(f => `${f.name} (${f.isTracking ? 'Active Live tracking' : 'SOS only'})`).join(', ')}
+                      Click to view and manage your trusted list
                     </p>
                   </>
                 )}
@@ -786,11 +1011,16 @@ export default function App() {
               <button 
                 className="add-compact-btn" 
                 id="btn-add-friend-trigger" 
-                onClick={() => setShowAddFriendModal(true)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowAddFriendModal(true);
+                }}
               >
                 <Plus size={15} strokeWidth={3} /> Add
               </button>
             </div>
+
+
 
             <h2 className="section-title">Quick Access</h2>
             
@@ -1304,7 +1534,7 @@ export default function App() {
                 <span className="profile-btn-label">Stress Assessment</span>
               </div>
 
-              <div className="profile-btn" onClick={() => { setCurrentScreen('home'); setShowAddFriendModal(true); }}>
+              <div className="profile-btn" onClick={() => { setCurrentScreen('contacts'); }}>
                 <div className="profile-btn-icon-wrapper">
                   <Users size={22} />
                 </div>
@@ -1312,10 +1542,11 @@ export default function App() {
               </div>
 
               <div className="profile-btn profile-btn-logout" onClick={() => {
-                if (window.confirm('Simulate Logout from SafeHer secure server?')) {
+                if (window.confirm('Are you sure you want to log out of SafeHer?')) {
+                  localStorage.removeItem('safeher_token');
                   pushNotification('User Logged Out', 'Authentication tokens successfully purged.');
-                  alert('Logged out! Resetting to base client credential.');
-                  setProfile({ name: 'Aarya', phone: '+91 9119892200', avatarLetter: 'A' });
+                  setIsAuthenticated(false);
+                  setCurrentScreen('home');
                 }
               }}>
                 <div className="profile-btn-icon-wrapper">
@@ -1434,6 +1665,135 @@ export default function App() {
             </div>
 
           </section>
+
+          {/* SCREEN: TRUSTED CONTACTS LIST VIEW */}
+          {currentScreen === 'contacts' && (
+            <section className="screen active" id="screen-contacts">
+              <div className="modal-header-row" style={{ marginBottom: '16px' }}>
+                <h2 className="section-title" style={{ marginTop: '0', marginBottom: '0' }}>Trusted Contacts</h2>
+                <button 
+                  className="add-compact-btn" 
+                  onClick={() => setShowAddFriendModal(true)}
+                  style={{ backgroundColor: 'var(--primary)' }}
+                >
+                  <Plus size={15} strokeWidth={3} /> Add New
+                </button>
+              </div>
+              <p className="screen-subtitle">Manage emergency connections for SOS and route safety tracking</p>
+
+              {friends.length === 0 ? (
+                <div className="m-card" style={{ textAlign: 'center', padding: '40px 24px' }}>
+                  <Users size={48} style={{ color: 'var(--text-muted)', margin: '0 auto 16px', opacity: 0.5 }} />
+                  <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '8px' }}>No contacts added yet</h3>
+                  <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '24px' }}>Add friends or family to enable SOS alert broadcasts and live tracking.</p>
+                  <button className="vibrant-pink-btn" style={{ maxWidth: '200px', margin: '0 auto' }} onClick={() => setShowAddFriendModal(true)}>
+                    <Plus size={16} /> Add First Contact
+                  </button>
+                </div>
+              ) : (
+                <div className="contacts-list-container" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {friends.map((friend) => (
+                    <div 
+                      key={friend.id} 
+                      className="contact-item-row"
+                      onClick={() => {
+                        setSelectedContact(friend);
+                        setShowContactDetailsModal(true);
+                      }}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        backgroundColor: 'var(--card-bg)',
+                        borderRadius: '16px',
+                        padding: '14px 18px',
+                        boxShadow: 'var(--shadow-subtle)',
+                        cursor: 'pointer',
+                        transition: 'transform 0.2s ease, box-shadow 0.2s ease',
+                        border: '1px solid rgba(63, 29, 56, 0.03)'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.transform = 'translateY(-1px)';
+                        e.currentTarget.style.boxShadow = '0 4px 12px rgba(63, 29, 56, 0.08)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.transform = 'translateY(0)';
+                        e.currentTarget.style.boxShadow = 'var(--shadow-subtle)';
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <div 
+                          style={{
+                            width: '40px',
+                            height: '40px',
+                            borderRadius: '50%',
+                            backgroundColor: 'var(--primary-light)',
+                            color: 'var(--primary)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontWeight: '600',
+                            fontSize: '15px'
+                          }}
+                        >
+                          {friend.name ? friend.name[0].toUpperCase() : 'U'}
+                        </div>
+                        <div>
+                          <h4 style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-main)' }}>{friend.name}</h4>
+                          <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{friend.phone}</p>
+                        </div>
+                      </div>
+                      
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} onClick={(e) => e.stopPropagation()}>
+                        <span 
+                          style={{
+                            fontSize: '10px',
+                            fontWeight: '600',
+                            color: friend.isTracking ? 'var(--primary)' : 'var(--text-muted)',
+                            backgroundColor: friend.isTracking ? 'var(--primary-light)' : 'var(--bg-app)',
+                            padding: '3px 8px',
+                            borderRadius: '6px'
+                          }}
+                        >
+                          {friend.isTracking ? 'SOS + Live' : 'SOS Only'}
+                        </span>
+                        <button 
+                          className="icon-btn" 
+                          onClick={() => {
+                            setEditContactForm({
+                              name: friend.name,
+                              phone: friend.phone.replace(/\D/g, '').slice(-10),
+                              isSOS: friend.isTracking
+                            });
+                            setEditingContact(friend);
+                            setShowEditContactModal(true);
+                          }}
+                          style={{ padding: '6px', color: 'var(--text-muted)' }}
+                        >
+                          <Edit size={14} />
+                        </button>
+                        <button 
+                          className="icon-btn" 
+                          onClick={() => initiateRemoveContact(friend.id)}
+                          style={{ padding: '6px', color: '#D32F2F' }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <button 
+                className="outline-btn" 
+                onClick={() => setCurrentScreen('home')}
+                style={{ marginTop: '24px', width: '100%' }}
+              >
+                Back to Dashboard
+              </button>
+            </section>
+          )}
 
         </main>
 
@@ -1684,6 +2044,260 @@ export default function App() {
             MODAL DRAWER COMPONENT LAYOUTS
             ======================================================= */}
 
+        {/* CUSTOM THEMED CENTERED DELETE CONFIRMATION MODAL */}
+        {showDeleteConfirmModal && contactToDeleteId && (
+          <div 
+            className="m-modal-backdrop" 
+            onClick={() => { if (!removingContact) { setShowDeleteConfirmModal(false); setContactToDeleteId(null); } }} 
+            id="modal-delete-confirm"
+            style={{ alignItems: 'center' }}
+          >
+            <div 
+              className="m-modal-card" 
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                borderRadius: '24px',
+                margin: '20px',
+                width: '90%',
+                maxWidth: '340px',
+                animation: 'fade-in 0.25s ease forwards',
+                transform: 'none',
+                padding: '24px'
+              }}
+            >
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', gap: '16px' }}>
+                <div 
+                  style={{
+                    width: '56px',
+                    height: '56px',
+                    borderRadius: '50%',
+                    backgroundColor: '#FFEBEE',
+                    color: '#D32F2F',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: 'var(--shadow-subtle)'
+                  }}
+                >
+                  <AlertTriangle size={28} />
+                </div>
+                
+                <div>
+                  <h3 style={{ fontSize: '18px', fontWeight: '700', color: 'var(--text-main)', marginBottom: '8px' }}>Remove Contact?</h3>
+                  <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.5' }}>
+                    Are you sure you want to remove <strong>{friends.find(f => f.id === contactToDeleteId)?.name || 'this contact'}</strong> from your emergency list? They will no longer receive SOS alerts.
+                  </p>
+                </div>
+              </div>
+
+              <div className="modal-action-row" style={{ marginTop: '20px' }}>
+                <button 
+                  type="button" 
+                  className="outline-btn" 
+                  onClick={() => { setShowDeleteConfirmModal(false); setContactToDeleteId(null); }}
+                  disabled={removingContact}
+                  style={{ padding: '12px 20px', fontSize: '13px' }}
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="button" 
+                  className="vibrant-pink-btn" 
+                  onClick={confirmRemoveContact}
+                  disabled={removingContact}
+                  style={{ 
+                    flex: '1.5', 
+                    padding: '12px 20px', 
+                    fontSize: '13px', 
+                    backgroundColor: '#D32F2F', 
+                    boxShadow: '0 4px 14px rgba(211, 47, 47, 0.3)' 
+                  }}
+                >
+                  {removingContact ? (
+                    <>
+                      <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> Removing...
+                    </>
+                  ) : (
+                    'Remove Contact'
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL: VIEW CONTACT DETAILS */}
+        {showContactDetailsModal && selectedContact && (
+          <div className="m-modal-backdrop" onClick={() => { setShowContactDetailsModal(false); setSelectedContact(null); }} id="modal-view-contact">
+            <div className="m-modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header-row">
+                <h3 className="modal-header-title">Emergency Contact Details</h3>
+                <button className="icon-btn" onClick={() => { setShowContactDetailsModal(false); setSelectedContact(null); }}>
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '20px 0', gap: '12px' }}>
+                <div 
+                  style={{
+                    width: '72px',
+                    height: '72px',
+                    borderRadius: '50%',
+                    backgroundColor: 'var(--primary-light)',
+                    color: 'var(--primary)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontWeight: '700',
+                    fontSize: '28px',
+                    boxShadow: 'var(--shadow-subtle)'
+                  }}
+                >
+                  {selectedContact.name ? selectedContact.name[0].toUpperCase() : 'U'}
+                </div>
+                <h2 style={{ fontSize: '20px', fontWeight: '700', color: 'var(--text-main)' }}>{selectedContact.name}</h2>
+                <span 
+                  style={{
+                    fontSize: '11px',
+                    fontWeight: '600',
+                    color: selectedContact.isTracking ? 'var(--primary)' : 'var(--text-muted)',
+                    backgroundColor: selectedContact.isTracking ? 'var(--primary-light)' : 'var(--bg-app)',
+                    padding: '4px 12px',
+                    borderRadius: '8px'
+                  }}
+                >
+                  {selectedContact.isTracking ? '✓ SOS Enabled + Live Tracking' : 'SOS Enabled Only'}
+                </span>
+              </div>
+
+              <div className="m-card" style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '16px', backgroundColor: 'var(--bg-app)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(63, 29, 56, 0.05)', paddingBottom: '8px' }}>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '500' }}>Contact ID</span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-main)', fontWeight: '600', fontFamily: 'var(--font-mono)' }}>{selectedContact.id}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(63, 29, 56, 0.05)', paddingBottom: '8px' }}>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '500' }}>Phone Number</span>
+                  <span style={{ fontSize: '12px', color: 'var(--text-main)', fontWeight: '600' }}>{selectedContact.phone}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '4px' }}>
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '500' }}>SOS Tracker status</span>
+                  <span style={{ fontSize: '12px', color: selectedContact.isTracking ? 'var(--primary)' : 'var(--text-muted)', fontWeight: '600' }}>
+                    {selectedContact.isTracking ? 'Active Live Monitor' : 'SOS Emergency Alert'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="modal-action-row">
+                <button 
+                  type="button" 
+                  className="outline-btn" 
+                  onClick={() => {
+                    setEditContactForm({
+                      name: selectedContact.name,
+                      phone: selectedContact.phone.replace(/\D/g, '').slice(-10),
+                      isSOS: selectedContact.isTracking
+                    });
+                    setEditingContact(selectedContact);
+                    setShowContactDetailsModal(false);
+                    setShowEditContactModal(true);
+                  }}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                >
+                  <Edit size={16} /> Edit Contact
+                </button>
+                <button 
+                  type="button" 
+                  className="outline-btn" 
+                  onClick={() => initiateRemoveContact(selectedContact.id)}
+                  style={{ borderColor: '#D32F2F', color: '#D32F2F', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                >
+                  <Trash2 size={16} /> Remove
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL: EDIT FRIEND CONTACT */}
+        {showEditContactModal && editingContact && (
+          <div className="m-modal-backdrop" onClick={() => { setShowEditContactModal(false); setEditingContact(null); }} id="modal-edit-contact">
+            <div className="m-modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header-row">
+                <h3 className="modal-header-title">Edit Emergency Contact</h3>
+                <button className="icon-btn" onClick={() => { setShowEditContactModal(false); setEditingContact(null); }}>
+                  <X size={20} />
+                </button>
+              </div>
+
+              <form onSubmit={handleEditContactSubmit}>
+                <div className="m-form-group">
+                  <label className="m-form-label">Friend Name</label>
+                  <input 
+                    type="text" 
+                    className="m-form-input" 
+                    placeholder="e.g. Shreya Sis"
+                    required
+                    value={editContactForm.name}
+                    onChange={(e) => setEditContactForm({ ...editContactForm, name: e.target.value })}
+                  />
+                </div>
+
+                <div className="m-form-group">
+                  <label className="m-form-label">Phone Number</label>
+                  <input 
+                    type="tel" 
+                    className="m-form-input" 
+                    placeholder="e.g. 9876543210"
+                    required
+                    minLength={10}
+                    maxLength={10}
+                    pattern="\d{10}"
+                    value={editContactForm.phone}
+                    onChange={(e) => setEditContactForm({ ...editContactForm, phone: e.target.value.replace(/\D/g, '').slice(0, 10) })}
+                  />
+                </div>
+
+                <div className="m-form-group" style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid rgba(63, 29, 56, 0.05)', marginBottom: '20px' }}>
+                  <div>
+                    <label className="m-form-label" style={{ marginBottom: '2px' }}>Live Tracking / SOS contact</label>
+                    <p style={{ fontSize: '10.5px', color: 'var(--text-muted)' }}>Enable tracking support for emergency routes</p>
+                  </div>
+                  <div 
+                    style={{
+                      width: '44px',
+                      height: '24px',
+                      borderRadius: '12px',
+                      backgroundColor: editContactForm.isSOS ? 'var(--primary)' : '#E0DCDD',
+                      padding: '2px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      justifyContent: editContactForm.isSOS ? 'flex-end' : 'flex-start',
+                      transition: 'background-color 0.2s',
+                      flexShrink: 0
+                    }}
+                    onClick={() => setEditContactForm({ ...editContactForm, isSOS: !editContactForm.isSOS })}
+                  >
+                    <div style={{ width: '20px', height: '20px', borderRadius: '50%', backgroundColor: '#FFFFFF', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }}></div>
+                  </div>
+                </div>
+
+                <div className="modal-action-row">
+                  <button type="button" className="outline-btn" onClick={() => { setShowEditContactModal(false); setEditingContact(null); }} disabled={savingEditContact}>Cancel</button>
+                  <button type="submit" className="vibrant-pink-btn" style={{ flex: '1.5' }} disabled={savingEditContact}>
+                    {savingEditContact ? (
+                      <>
+                        <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> Saving...
+                      </>
+                    ) : (
+                      'Save Changes'
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
         {/* MODAL: ADD FRIEND CONTACT */}
         {showAddFriendModal && (
           <div className="m-modal-backdrop" onClick={() => setShowAddFriendModal(false)} id="modal-add-friend">
@@ -1713,16 +2327,27 @@ export default function App() {
                   <input 
                     type="tel" 
                     className="m-form-input" 
-                    placeholder="e.g. +91 99999 88888"
+                    placeholder="e.g. 9876543210"
                     required
+                    minLength={10}
+                    maxLength={10}
+                    pattern="\d{10}"
                     value={newFriendForm.phone}
-                    onChange={(e) => setNewFriendForm({ ...newFriendForm, phone: e.target.value })}
+                    onChange={(e) => setNewFriendForm({ ...newFriendForm, phone: e.target.value.replace(/\D/g, '').slice(0, 10) })}
                   />
                 </div>
 
                 <div className="modal-action-row">
-                  <button type="button" className="outline-btn" onClick={() => setShowAddFriendModal(false)}>Cancel</button>
-                  <button type="submit" className="vibrant-pink-btn" style={{ flex: '1.5' }}>Save Friend</button>
+                  <button type="button" className="outline-btn" onClick={() => setShowAddFriendModal(false)} disabled={savingContact}>Cancel</button>
+                  <button type="submit" className="vibrant-pink-btn" style={{ flex: '1.5' }} disabled={savingContact}>
+                    {savingContact ? (
+                      <>
+                        <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> Saving...
+                      </>
+                    ) : (
+                      'Save Friend'
+                    )}
+                  </button>
                 </div>
               </form>
             </div>
@@ -1891,6 +2516,11 @@ export default function App() {
                   <p style={{ fontSize: '10px', color: 'var(--text-muted)' }}>National call protocol dispatchers</p>
                 </div>
 
+                <div className="forum-chat-post-box" style={{ padding: '12px', cursor: 'pointer', marginBottom: '0' }} onClick={() => { setCurrentScreen('contacts'); setShowMenuDrawer(false); }}>
+                  <h4 style={{ fontSize: '13px', fontWeight: '600' }}>👥 Trusted Contacts List</h4>
+                  <p style={{ fontSize: '10px', color: 'var(--text-muted)' }}>View and edit emergency contacts</p>
+                </div>
+
                 <div className="forum-chat-post-box" style={{ padding: '12px', cursor: 'pointer', marginBottom: '0' }} onClick={() => { setCurrentScreen('profile'); setShowMenuDrawer(false); }}>
                   <h4 style={{ fontSize: '13px', fontWeight: '600' }}>👤 Manage Identity Shield</h4>
                   <p style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Adjust primary credentials & contacts</p>
@@ -1941,8 +2571,8 @@ export default function App() {
             </div>
           </div>
         )}
-
       </div>
+      )}
     </div>
   );
 }
