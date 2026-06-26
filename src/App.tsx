@@ -173,14 +173,14 @@ export default function App() {
 
   // Calculate unread notifications
   useEffect(() => {
-    setUnreadCount(notifications.filter(n => n.unread).length);
+    setUnreadCount(notifications.filter((n: AppNotification) => n.unread).length);
   }, [notifications]);
 
   // Audio recording timer simulation
   useEffect(() => {
     if (isRecording) {
       recordingTimerRef.current = setInterval(() => {
-        setRecordingSeconds(prev => prev + 1);
+        setRecordingSeconds((prev: number) => prev + 1);
       }, 1000);
     } else {
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
@@ -195,7 +195,7 @@ export default function App() {
     let pulse: NodeJS.Timeout;
     if (isSharingLocation) {
       pulse = setInterval(() => {
-        setLocationPulse(p => !p);
+        setLocationPulse((p: boolean) => !p);
       }, 1500);
     }
     return () => clearInterval(pulse);
@@ -276,7 +276,7 @@ export default function App() {
   useEffect(() => {
     if (fakeCallState === 'active') {
       callTimerRef.current = setInterval(() => {
-        setActiveCallDuration(prev => prev + 1);
+        setActiveCallDuration((prev: number) => prev + 1);
       }, 1000);
     } else {
       if (callTimerRef.current) {
@@ -334,7 +334,7 @@ export default function App() {
     pushNotification('Call Armed', 'Incoming call is scheduled in 3 seconds.');
     
     const countInterval = setInterval(() => {
-      setCallCountdownSecs(prev => {
+      setCallCountdownSecs((prev: number) => {
         if (prev <= 1) {
           clearInterval(countInterval);
           setFakeCallState('ringing');
@@ -381,7 +381,7 @@ export default function App() {
       time: 'Just now',
       unread: true
     };
-    setNotifications(prev => [newNo, ...prev]);
+    setNotifications((prev: AppNotification[]) => [newNo, ...prev]);
   };
 
   const toggleLocationSharing = () => {
@@ -405,14 +405,14 @@ export default function App() {
       phone: newFriendForm.phone,
       isTracking: true
     };
-    setFriends(prev => [...prev, newFr]);
+    setFriends((prev: Friend[]) => [...prev, newFr]);
     setNewFriendForm({ name: '', phone: '' });
     setShowAddFriendModal(false);
     pushNotification('Added Friend', `${newFr.name} is now added for emergency SOS tracking.`);
   };
 
   const toggleTrackFriend = (id: string) => {
-    setFriends(prev => prev.map(f => f.id === id ? { ...f, isTracking: !f.isTracking } : f));
+    setFriends((prev: Friend[]) => prev.map((f: Friend) => f.id === id ? { ...f, isTracking: !f.isTracking } : f));
   };
 
   // STRESS QUIZ logic handling
@@ -446,7 +446,7 @@ export default function App() {
 
   const toggleSymptom = (sym: string) => {
     if (cycleSymptoms.includes(sym)) {
-      setCycleSymptoms(cycleSymptoms.filter(s => s !== sym));
+      setCycleSymptoms(cycleSymptoms.filter((s: string) => s !== sym));
     } else {
       setCycleSymptoms([...cycleSymptoms, sym]);
     }
@@ -454,7 +454,7 @@ export default function App() {
 
   // FORUM interaction
   const handleLikePost = (postId: string) => {
-    setForumPosts(posts => posts.map(p => {
+    setForumPosts((posts: ForumPost[]) => posts.map((p: ForumPost) => {
       if (p.id === postId) {
         return {
           ...p,
@@ -517,7 +517,7 @@ export default function App() {
 
   const closeNotifications = () => {
     // mark all read
-    setNotifications(prev => prev.map(n => ({ ...n, unread: false })));
+    setNotifications((prev: AppNotification[]) => prev.map((n: AppNotification) => ({ ...n, unread: false })));
     setShowNotificationDrawer(false);
   };
 
