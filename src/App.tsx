@@ -499,19 +499,6 @@ export default function App() {
 
   const handleAddFriend = async (e: React.FormEvent) => {
     e.preventDefault();
-<<<<<<< HEAD
-    if (!newFriendForm.name || !newFriendForm.phone) return;
-    const newFr: Friend = {
-      id: Date.now().toString(),
-      name: newFriendForm.name,
-      phone: newFriendForm.phone,
-      isTracking: true
-    };
-    setFriends((prev: Friend[]) => [...prev, newFr]);
-    setNewFriendForm({ name: '', phone: '' });
-    setShowAddFriendModal(false);
-    pushNotification('Added Friend', `${newFr.name} is now added for emergency SOS tracking.`);
-=======
     if (!newFriendForm.name || !newFriendForm.phone || savingContact) return;
 
     setSavingContact(true);
@@ -612,7 +599,6 @@ export default function App() {
       setShowDeleteConfirmModal(false);
       setContactToDeleteId(null);
     }
->>>>>>> 69a8fce8edde7a5e1097e3a5ea2a2a7dc2612be2
   };
 
   const toggleTrackFriend = (id: string) => {
