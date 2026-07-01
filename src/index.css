@@ -2022,3 +2022,9 @@ body {
   width: 12px;
   height: 12px;
 }
+
+/* AI Voice Alert Spin animation helper */
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+

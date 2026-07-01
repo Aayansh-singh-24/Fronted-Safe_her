@@ -79,6 +79,137 @@ interface AppNotification {
   unread: boolean;
 }
 
+// Active Siren audio generator instance
+let activeSirenInstance: { stop: () => void } | null = null;
+
+const startSirenAlarm = () => {
+  if (activeSirenInstance) return;
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const audioCtx = new AudioContextClass();
+    const osc = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(800, audioCtx.currentTime);
+    gainNode.gain.setValueAtTime(0.4, audioCtx.currentTime);
+    
+    osc.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    osc.start();
+    
+    let isUp = true;
+    const sweepInterval = setInterval(() => {
+      if (audioCtx.state === 'closed') return;
+      const targetFreq = isUp ? 1300 : 700;
+      osc.frequency.setValueAtTime(osc.frequency.value, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(targetFreq, audioCtx.currentTime + 0.45);
+      isUp = !isUp;
+    }, 500);
+
+    activeSirenInstance = {
+      stop: () => {
+        clearInterval(sweepInterval);
+        try {
+          osc.stop();
+        } catch (e) {}
+        try {
+          audioCtx.close();
+        } catch (e) {}
+        activeSirenInstance = null;
+      }
+    };
+  } catch (err) {
+    console.error("Failed to start siren alarm:", err);
+  }
+};
+
+const stopSirenAlarm = () => {
+  if (activeSirenInstance) {
+    activeSirenInstance.stop();
+  }
+};
+
+// Client-side WAV recording encoder
+const recordWavAudio = async (
+  durationMs: number,
+  onProcess: (rms: number) => void
+): Promise<Blob> => {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+  const audioCtx = new AudioContextClass();
+  const source = audioCtx.createMediaStreamSource(stream);
+  
+  const scriptNode = audioCtx.createScriptProcessor(2048, 1, 1);
+  const sampleRate = audioCtx.sampleRate;
+  
+  const leftChannel: Float32Array[] = [];
+  let recordingLength = 0;
+  
+  scriptNode.onaudioprocess = (e) => {
+    const inputBuffer = e.inputBuffer;
+    const inputData = inputBuffer.getChannelData(0);
+    leftChannel.push(new Float32Array(inputData));
+    recordingLength += inputData.length;
+    
+    let sum = 0;
+    for (let i = 0; i < inputData.length; i++) {
+      sum += inputData[i] * inputData[i];
+    }
+    const rms = Math.sqrt(sum / inputData.length);
+    onProcess(rms);
+  };
+  
+  source.connect(scriptNode);
+  scriptNode.connect(audioCtx.destination);
+  
+  await new Promise((resolve) => setTimeout(resolve, durationMs));
+  
+  source.disconnect();
+  scriptNode.disconnect();
+  stream.getTracks().forEach((track) => track.stop());
+  await audioCtx.close();
+  
+  const resultBuffer = new Float32Array(recordingLength);
+  let offset = 0;
+  for (let i = 0; i < leftChannel.length; i++) {
+    resultBuffer.set(leftChannel[i], offset);
+    offset += leftChannel[i].length;
+  }
+  
+  const buffer = new ArrayBuffer(44 + resultBuffer.length * 2);
+  const view = new DataView(buffer);
+  
+  const writeString = (view: DataView, offset: number, string: string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  };
+  
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + resultBuffer.length * 2, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM format
+  view.setUint16(22, 1, true); // 1 channel
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byteRate = sampleRate * 2
+  view.setUint16(32, 2, true); // blockAlign
+  view.setUint16(34, 16, true); // bitsPerSample
+  writeString(view, 36, 'data');
+  view.setUint32(40, resultBuffer.length * 2, true);
+  
+  let index = 44;
+  for (let i = 0; i < resultBuffer.length; i++) {
+    let s = Math.max(-1, Math.min(1, resultBuffer[i]));
+    view.setInt16(index, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    index += 2;
+  }
+  
+  return new Blob([view], { type: 'audio/wav' });
+};
+
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
@@ -106,6 +237,21 @@ export default function App() {
   const [sosCountdown, setSosCountdown] = useState<number | null>(null);
   const [isSOSActive, setIsSOSActive] = useState(false);
   const [sosUploadStatus, setSosUploadStatus] = useState<'idle' | 'uploading' | 'done' | 'error'>('idle');
+
+  // ML Voice Distress detection states
+  const [mlStatus, setMlStatus] = useState<'idle' | 'recording' | 'analyzing' | 'done' | 'error'>('idle');
+  const [mlResult, setMlResult] = useState<{
+    distress_detected: boolean;
+    reason: string;
+    transcript: string;
+    metrics: {
+      rms: number;
+      peak_frequency: number;
+      energy_ratio: number;
+      keyword_match: string | null;
+    };
+  } | null>(null);
+  const [realtimeRms, setRealtimeRms] = useState(0);
 
   // SOS Real Audio Recording refs
   const sosMediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -313,6 +459,51 @@ export default function App() {
       sosStreamRef.current = null;
     }
     sosMediaRecorderRef.current = null;
+  };
+
+  // Run AI distress verification
+  const runDistressDetection = async () => {
+    setMlStatus('recording');
+    setMlResult(null);
+    setRealtimeRms(0);
+    
+    try {
+      // Capture 4 seconds of microphone input as standard WAV
+      const wavBlob = await recordWavAudio(4000, (rms) => {
+        setRealtimeRms(rms);
+      });
+      
+      setMlStatus('analyzing');
+      
+      const formData = new FormData();
+      formData.append('file', wavBlob, 'voice_distress_record.wav');
+      
+      const response = await fetch('http://127.0.0.1:8000/detect-distress', {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        throw new Error(`ML backend distress check failed with status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      setMlResult(data);
+      setMlStatus('done');
+      
+      if (data.distress_detected) {
+        // High intensity scream or distress keyword detected
+        startSirenAlarm();
+        fetchLocationAndTriggerSOS(`AI Alert Triggered — ${data.reason}`);
+        setIsSOSActive(true);
+      }
+    } catch (err) {
+      console.warn("ML Voice Distress detector unreachable or error:", err);
+      setMlStatus('error');
+      pushNotification('AI Guard Unreachable', 'ML backend is offline. Launching fallback emergency mode.');
+      // Auto-fallback: start standard SOS countdown immediately for safety!
+      setSosCountdown(3);
+    }
   };
 
   // SOS: Call the backend alert API with current location
@@ -1873,12 +2064,7 @@ export default function App() {
             <button 
               className="sos-nav-btn" 
               id="sos-trigger-nav-btn" 
-              onClick={() => {
-                // Fetch the location internally and call the alert API
-                fetchLocationAndTriggerSOS('SOS Alert dispatched — Lat: {lat}, Lng: {lng}.');
-                // Also start the full SOS countdown flow
-                setSosCountdown(3);
-              }}
+              onClick={runDistressDetection}
             >
               <AlertTriangle strokeWidth={2.5} />
             </button>
@@ -1931,6 +2117,27 @@ export default function App() {
               }
             </p>
 
+            {isSOSActive && mlResult && mlResult.distress_detected && (
+              <div style={{
+                backgroundColor: 'rgba(211, 47, 47, 0.1)',
+                border: '1px solid rgba(211, 47, 47, 0.2)',
+                color: '#fff',
+                padding: '10px 16px',
+                borderRadius: '12px',
+                fontSize: '12px',
+                margin: '12px 0 20px',
+                width: '100%',
+                textAlign: 'left'
+              }}>
+                <strong style={{ color: '#FF8A80' }}>🚨 AI Voice Trigger Active:</strong> {mlResult.reason}
+                {mlResult.transcript && (
+                  <div style={{ marginTop: '6px', fontSize: '11px', color: 'rgba(255,255,255,0.7)', fontStyle: 'italic' }}>
+                    Speech detected: "{mlResult.transcript}"
+                  </div>
+                )}
+              </div>
+            )}
+
             {isSOSActive && (
               <div className="sos-immed-sms-panel">
                 <span className="sms-badge">Sent SMS Link to {friends.map(f => f.name).join(', ')}</span>
@@ -1959,6 +2166,7 @@ export default function App() {
                 onClick={() => {
                   setSosCountdown(null);
                   setIsSOSActive(false);
+                  stopSirenAlarm();
                   // Stop mic recording and upload audio
                   stopSOSRecordingAndUpload();
                   pushNotification('SOS Cancelled', 'Emergency deactivated. Audio evidence being uploaded.');
@@ -1970,6 +2178,161 @@ export default function App() {
           </div>
         )}
 
+
+        {/* AI VOICE DISTRESS DETECTOR SCAN OVERLAY */}
+        {mlStatus !== 'idle' && mlStatus !== 'done' && (
+          <div className="sos-overlay-fullscreen" style={{ backgroundColor: '#1E1218', color: '#FFFFFF', zIndex: 1100 }}>
+            <div className="brand-logo-container" style={{ width: '64px', height: '64px', backgroundColor: 'var(--primary)', marginBottom: '24px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Shield fill="#FFFFFF" stroke="#FFFFFF" size={32} />
+            </div>
+            
+            <h2 style={{ fontSize: '22px', fontWeight: '700', color: 'var(--primary)', marginBottom: '8px' }}>
+              {mlStatus === 'recording' ? 'AI Voice Guard Scanning' : 'Analyzing Sound Waves'}
+            </h2>
+            
+            {mlStatus === 'recording' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%' }}>
+                <div 
+                  className="record-mic-button recording" 
+                  style={{ 
+                    width: '80px', 
+                    height: '80px', 
+                    backgroundColor: 'rgba(233,30,99,0.15)',
+                    border: '4px solid var(--primary)',
+                    borderRadius: '50%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    marginBottom: '20px',
+                    position: 'relative'
+                  }}
+                >
+                  <Mic size={36} style={{ color: 'var(--primary)' }} />
+                  <div className="record-pulse-radar" style={{ position: 'absolute', top: '-10px', left: '-10px', right: '-10px', bottom: '-10px', borderRadius: '50%', border: '2px solid var(--primary)', opacity: 0.5, animation: 'pulse-ring 1.5s infinite' }}></div>
+                </div>
+
+                <p style={{ fontSize: '14px', color: '#FFE1ED', fontWeight: '500', marginBottom: '4px' }}>
+                  Listening for screaming or keywords...
+                </p>
+                <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)', fontStyle: 'italic', marginBottom: '24px' }}>
+                  "Help me", "Emergency", "Bachao", "Madad"
+                </p>
+
+                {/* Dynamic Wave Bounce */}
+                <div className="record-wave-bars-flex" style={{ margin: '20px 0', height: '50px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  {[...Array(8)].map((_, i) => {
+                    const height = Math.max(8, Math.min(60, 12 + realtimeRms * 150 * (0.8 + 0.4 * Math.sin(i * 1.5 + Date.now() / 80))));
+                    return (
+                      <div 
+                        key={i} 
+                        style={{ 
+                          height: `${height}px`, 
+                          backgroundColor: 'var(--primary)', 
+                          width: '5px', 
+                          margin: '0 4px',
+                          borderRadius: '3px',
+                          transition: 'height 0.05s ease-out'
+                        }}
+                      ></div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '20px' }}>
+                <Loader2 className="animate-spin" size={48} style={{ color: 'var(--primary)', marginBottom: '20px' }} />
+                <p style={{ fontSize: '15px', color: '#FFE1ED', fontWeight: '500', marginBottom: '8px' }}>
+                  Running DSP Signal Analysis...
+                </p>
+                <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)' }}>
+                  Calculating RMS energy & searching transliterated keywords
+                </p>
+              </div>
+            )}
+            
+            <button 
+              className="sos-cancel-btn" 
+              style={{ marginTop: '40px', backgroundColor: 'rgba(255,255,255,0.1)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)' }}
+              onClick={() => {
+                setMlStatus('idle');
+              }}
+            >
+              Cancel Scan
+            </button>
+          </div>
+        )}
+
+        {mlStatus === 'done' && mlResult && !mlResult.distress_detected && (
+          <div className="sos-overlay-fullscreen" style={{ backgroundColor: '#1E1218', color: '#FFFFFF', zIndex: 1100 }}>
+            <div className="icon-container-green" style={{ width: '64px', height: '64px', backgroundColor: 'rgba(76, 175, 80, 0.1)', color: '#4CAF50', marginBottom: '24px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '50%' }}>
+              <Check size={32} />
+            </div>
+
+            <h2 style={{ fontSize: '22px', fontWeight: '700', color: '#4CAF50', marginBottom: '8px' }}>
+              No Distress Detected
+            </h2>
+            <p style={{ fontSize: '13px', color: 'rgba(255,255,255,0.7)', marginBottom: '24px', maxWidth: '300px', lineHeight: '1.6' }}>
+              Ambient audio analysis indicates a normal background sound signature.
+            </p>
+
+            {/* Audio Metrics Card */}
+            <div className="m-card" style={{ backgroundColor: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#fff', width: '100%', padding: '16px', borderRadius: '16px', textAlign: 'left', marginBottom: '24px' }}>
+              <h4 style={{ fontSize: '12px', color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '10px', fontWeight: '700' }}>AI DSP Telemetry</h4>
+              
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12px', padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <span style={{ color: 'rgba(255,255,255,0.6)' }}>Speech Transcript:</span>
+                <span style={{ fontWeight: '500', color: mlResult.transcript ? '#E91E63' : 'rgba(255,255,255,0.4)', maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {mlResult.transcript ? `"${mlResult.transcript}"` : 'No speech recognized'}
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <span style={{ color: 'rgba(255,255,255,0.6)' }}>Loudness (RMS):</span>
+                <span style={{ fontFamily: 'var(--font-mono)' }}>
+                  {mlResult.metrics.rms.toFixed(4)} <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>(Thresh: 0.15)</span>
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <span style={{ color: 'rgba(255,255,255,0.6)' }}>Peak Frequency:</span>
+                <span style={{ fontFamily: 'var(--font-mono)' }}>
+                  {mlResult.metrics.peak_frequency.toFixed(1)} Hz
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', padding: '6px 0' }}>
+                <span style={{ color: 'rgba(255,255,255,0.6)' }}>Scream Band Ratio:</span>
+                <span style={{ fontFamily: 'var(--font-mono)' }}>
+                  {(mlResult.metrics.energy_ratio * 100).toFixed(1)}% <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>(Thresh: 40%)</span>
+                </span>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', width: '100%', gap: '12px' }}>
+              <button 
+                className="vibrant-pink-btn" 
+                style={{ backgroundColor: '#D32F2F', boxShadow: '0 4px 14px rgba(211, 47, 47, 0.4)' }}
+                onClick={() => {
+                  setMlStatus('idle');
+                  fetchLocationAndTriggerSOS('Manual override: SOS alert dispatched.');
+                  setIsSOSActive(true);
+                }}
+              >
+                Force SOS Alert
+              </button>
+
+              <button 
+                className="sos-cancel-btn" 
+                style={{ backgroundColor: 'rgba(255,255,255,0.1)', color: '#fff', border: '1px solid rgba(255,255,255,0.15)', margin: '0' }}
+                onClick={() => {
+                  setMlStatus('idle');
+                }}
+              >
+                Return to Safety Portal
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* FAKE CALL COUNTDOWN TICKER OVERLAY */}
         {fakeCallState === 'countdown' && (
