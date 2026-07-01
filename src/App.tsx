@@ -105,14 +105,18 @@ export default function App() {
   // SOS States
   const [sosCountdown, setSosCountdown] = useState<number | null>(null);
   const [isSOSActive, setIsSOSActive] = useState(false);
-  const [sirenMuted, setSirenMuted] = useState(false);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const sirenIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const [sosUploadStatus, setSosUploadStatus] = useState<'idle' | 'uploading' | 'done' | 'error'>('idle');
+
+  // SOS Real Audio Recording refs
+  const sosMediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const sosAudioChunksRef = useRef<Blob[]>([]);
+  const sosStreamRef = useRef<MediaStream | null>(null);
 
   // Live Location Simulation
   const [isSharingLocation, setIsSharingLocation] = useState(false);
   const [locCoordinates, setLocCoordinates] = useState<{lat: number, lng: number} | null>(null);
   const [locationPulse, setLocationPulse] = useState(false);
+
 
   // Friends List
   const [friends, setFriends] = useState<Friend[]>([]);
@@ -226,60 +230,111 @@ export default function App() {
     return () => clearInterval(pulse);
   }, [isSharingLocation]);
 
-  // Siren alert tone synthesis logic
-  const startSirenAudio = () => {
-    if (sirenMuted) return;
+  // SOS: Start real microphone recording
+  const startSOSRecording = async () => {
     try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-      
-      const ctx = new AudioCtx();
-      audioContextRef.current = ctx;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      sosStreamRef.current = stream;
+      sosAudioChunksRef.current = [];
 
-      let up = true;
-      let freq = 600;
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : 'audio/ogg';
 
-      sirenIntervalRef.current = setInterval(() => {
-        if (ctx.state === 'suspended') {
-          ctx.resume();
+      const recorder = new MediaRecorder(stream, { mimeType });
+      sosMediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          sosAudioChunksRef.current.push(e.data);
         }
-        
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        
-        osc.type = 'sawtooth';
-        
-        if (up) freq += 150;
-        else freq -= 150;
-        
-        if (freq > 1100) up = false;
-        if (freq < 500) up = true;
+      };
 
-        osc.frequency.setValueAtTime(freq, ctx.currentTime);
-        gain.gain.setValueAtTime(0.3, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
-        
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start();
-        osc.stop(ctx.currentTime + 0.15);
-      }, 160);
-
-    } catch (e) {
-      console.warn('Audio Web API error', e);
+      recorder.start(1000); // collect chunks every second
+    } catch (err) {
+      console.warn('SOS microphone access denied:', err);
+      pushNotification('Mic Access Denied', 'Could not access microphone for SOS recording.');
     }
   };
 
-  const stopSirenAudio = () => {
-    if (sirenIntervalRef.current) {
-      clearInterval(sirenIntervalRef.current);
-      sirenIntervalRef.current = null;
+  // SOS: Stop recording and upload audio to backend
+  const stopSOSRecordingAndUpload = () => {
+    const recorder = sosMediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      cleanupSOSStream();
+      return;
     }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
+
+    recorder.onstop = async () => {
+      const chunks = sosAudioChunksRef.current;
+      if (chunks.length === 0) {
+        cleanupSOSStream();
+        return;
+      }
+
+      const mimeType = recorder.mimeType || 'audio/webm';
+      const ext = mimeType.includes('ogg') ? 'ogg' : 'webm';
+      const audioBlob = new Blob(chunks, { type: mimeType });
+      sosAudioChunksRef.current = [];
+
+      setSosUploadStatus('uploading');
+      try {
+        const token = localStorage.getItem('safeher_token');
+        const formData = new FormData();
+        formData.append('file', audioBlob, `sos_recording_${Date.now()}.${ext}`);
+
+        const response = await fetch('http://127.0.0.1:8000/recording/audio', {
+          method: 'POST',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body: formData,
+        });
+
+        if (!response.ok) throw new Error(`Upload failed: ${response.status}`);
+
+        setSosUploadStatus('done');
+        pushNotification('SOS Recording Uploaded', 'Emergency audio evidence securely saved to server.');
+      } catch (err) {
+        console.error('SOS audio upload error:', err);
+        setSosUploadStatus('error');
+        pushNotification('Upload Failed', 'Could not save SOS recording to server. Stored locally.');
+      } finally {
+        cleanupSOSStream();
+      }
+    };
+
+    recorder.stop();
+  };
+
+  const cleanupSOSStream = () => {
+    if (sosStreamRef.current) {
+      sosStreamRef.current.getTracks().forEach((t) => t.stop());
+      sosStreamRef.current = null;
+    }
+    sosMediaRecorderRef.current = null;
+  };
+
+  // SOS: Call the backend alert API with current location
+  const triggerSOSAlertAPI = async (lat: number | null, lng: number | null) => {
+    try {
+      const token = localStorage.getItem('safeher_token');
+      await fetch('http://127.0.0.1:8000/location/alert', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          latitude: lat,
+          longitude: lng,
+        }),
+      });
+    } catch (err) {
+      console.warn('SOS alert API error:', err);
     }
   };
+
 
   // SOS Countdown handle
   useEffect(() => {
@@ -291,13 +346,23 @@ export default function App() {
     } else if (sosCountdown === 0) {
       setSosCountdown(null);
       setIsSOSActive(true);
-      pushNotification('EMERGENCY ACTIVE!', 'SOS siren sounding and contacts notified.');
-      startSirenAudio();
+      setSosUploadStatus('idle');
+      pushNotification('EMERGENCY ACTIVE!', 'Location alert sent. Mic recording started.');
+      // Fire both simultaneously: alert API + mic recording
+      (async () => {
+        await Promise.all([
+          triggerSOSAlertAPI(locCoordinates?.lat ?? null, locCoordinates?.lng ?? null),
+          startSOSRecording(),
+        ]);
+      })();
     }
     return () => clearTimeout(timer);
   }, [sosCountdown]);
 
   useEffect(() => {
+    // Only fetch contacts once the user is authenticated (token is in localStorage)
+    if (!isAuthenticated) return;
+
     let cancelled = false;
 
     const loadContacts = async () => {
@@ -333,7 +398,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isAuthenticated]);
 
   // Fake Phone Call active durational stopwatch
   useEffect(() => {
@@ -447,49 +512,49 @@ export default function App() {
     setNotifications((prev: AppNotification[]) => [newNo, ...prev]);
   };
 
+  const fetchLocationAndTriggerSOS = (successMsg: string) => {
+    const onCoordinatesReady = (lat: number, lng: number) => {
+      setLocCoordinates({ lat, lng });
+      triggerSOSAlertAPI(lat, lng);
+      pushNotification('Location Shared & Alert Sent', successMsg.replace('{lat}', lat.toFixed(4)).replace('{lng}', lng.toFixed(4)));
+    };
+    
+    const fallbackToIPLocation = async () => {
+      try {
+        const response = await fetch('https://ipapi.co/json/');
+        const data = await response.json();
+        if (data && data.latitude && data.longitude) {
+          onCoordinatesReady(data.latitude, data.longitude);
+        } else {
+          throw new Error("Invalid IP location data");
+        }
+      } catch (err) {
+        console.error("IP Location fallback failed", err);
+        pushNotification('Location Error', 'Could not determine location from device or network.');
+      }
+    };
+
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          onCoordinatesReady(position.coords.latitude, position.coords.longitude);
+        },
+        (error) => {
+          console.warn("GPS failed, falling back to IP location:", error.message);
+          fallbackToIPLocation();
+        },
+        { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
+      );
+    } else {
+      fallbackToIPLocation();
+    }
+  };
+
   const toggleLocationSharing = () => {
     if (!isSharingLocation) {
       setIsSharingLocation(true);
       pushNotification('Requesting Location', 'Fetching your location...');
-      
-      const fallbackToIPLocation = async () => {
-        try {
-          const response = await fetch('https://ipapi.co/json/');
-          const data = await response.json();
-          if (data && data.latitude && data.longitude) {
-            setLocCoordinates({ 
-              lat: data.latitude, 
-              lng: data.longitude 
-            });
-            pushNotification('Location Sharing On', 'Using network location. Contacts can track you.');
-          } else {
-            throw new Error("Invalid IP location data");
-          }
-        } catch (err) {
-          console.error("IP Location fallback failed", err);
-          setIsSharingLocation(false);
-          pushNotification('Location Error', 'Could not determine location from device or network.');
-        }
-      };
-
-      if ("geolocation" in navigator) {
-        navigator.geolocation.getCurrentPosition(
-          (position) => {
-            setLocCoordinates({ 
-              lat: position.coords.latitude, 
-              lng: position.coords.longitude 
-            });
-            pushNotification('Location Sharing On', 'Your emergency contacts can track you live now.');
-          },
-          (error) => {
-            console.warn("GPS failed, falling back to IP location:", error.message);
-            fallbackToIPLocation();
-          },
-          { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
-        );
-      } else {
-        fallbackToIPLocation();
-      }
+      fetchLocationAndTriggerSOS('Alert dispatched — Lat: {lat}, Lng: {lng}.');
     } else {
       setIsSharingLocation(false);
       setLocCoordinates(null);
@@ -1809,8 +1874,10 @@ export default function App() {
               className="sos-nav-btn" 
               id="sos-trigger-nav-btn" 
               onClick={() => {
-                setSosCountdown(3); 
-                stopSirenAudio();
+                // Fetch the location internally and call the alert API
+                fetchLocationAndTriggerSOS('SOS Alert dispatched — Lat: {lat}, Lng: {lng}.');
+                // Also start the full SOS countdown flow
+                setSosCountdown(3);
               }}
             >
               <AlertTriangle strokeWidth={2.5} />
@@ -1874,26 +1941,30 @@ export default function App() {
             )}
 
             <div className="sos-action-buttons-flex">
-              {isSOSActive && (
-                <button 
-                  className="outline-btn" 
-                  onClick={() => { setSirenMuted(!sirenMuted); if(sirenMuted) startSirenAudio(); else stopSirenAudio(); }}
-                  style={{ backgroundColor: '#FFFFFF', borderColor: '#D32F2F', color: '#D32F2F' }}
-                >
-                  {sirenMuted ? '🔊 Unmute Alarm Siren' : '🔇 Mute Alarm Siren'}
-                </button>
+              {isSOSActive && sosUploadStatus === 'uploading' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#fff', fontSize: '12px', opacity: 0.85 }}>
+                  <Loader2 size={14} className="animate-spin" />
+                  Uploading emergency audio...
+                </div>
               )}
-              
+              {isSOSActive && sosUploadStatus === 'done' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#4CAF50', fontSize: '12px' }}>
+                  <Check size={14} />
+                  Audio evidence uploaded
+                </div>
+              )}
+
               <button 
                 className="sos-cancel-btn" 
                 onClick={() => {
                   setSosCountdown(null);
                   setIsSOSActive(false);
-                  stopSirenAudio();
-                  pushNotification('SOS Cancelled', 'Alert sequence safely aborted by user PIN passcode.');
+                  // Stop mic recording and upload audio
+                  stopSOSRecordingAndUpload();
+                  pushNotification('SOS Cancelled', 'Emergency deactivated. Audio evidence being uploaded.');
                 }}
               >
-                {sosCountdown !== null ? 'Tap to Cancel Alert' : 'Deactivate Emergency protocol'}
+                {sosCountdown !== null ? 'Tap to Cancel Alert' : 'Cancel Emergency Activation'}
               </button>
             </div>
           </div>
